@@ -1,0 +1,8 @@
+{
+  "name": "Diagnóstico de Competencias en Compras",
+  "description": "Evaluación interactiva de 35 preguntas para diagnosticar competencias clave en compras y abastecimiento estratégico, con reportes detallados, soporte de bases de datos y emisión de certificados oficiales.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
