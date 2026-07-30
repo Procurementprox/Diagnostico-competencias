@@ -75,20 +75,12 @@ export default function AdminPanel({
     let totalPoints = 0;
     let totalQuestions = 0;
 
+    // Los aciertos por área vienen del servidor; sin calificación no suman.
     results.forEach((res) => {
-      // Find all questions of this area
-      const areaQuestionsIndexes: number[] = [];
-      PREGUNTAS.forEach((q, i) => {
-        if (q.area === areaId) areaQuestionsIndexes.push(i);
-      });
-
-      areaQuestionsIndexes.forEach((qIdx) => {
-        const correctIndex = PREGUNTAS[qIdx].correctAnswerIndex;
-        if (res.answers[qIdx] === correctIndex) {
-          totalPoints += 1;
-        }
-        totalQuestions += 1;
-      });
+      const porArea = res.grading?.porArea?.[areaId];
+      if (!porArea) return;
+      totalPoints += porArea.aciertos;
+      totalQuestions += porArea.total;
     });
 
     return totalQuestions ? Math.round((totalPoints / totalQuestions) * 100) : 0;

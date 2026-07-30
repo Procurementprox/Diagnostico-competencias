@@ -22,26 +22,32 @@ interface ExamResultsViewProps {
 export default function ExamResultsView({ result, onRestart }: ExamResultsViewProps) {
   const [showCertificate, setShowCertificate] = useState(false);
 
-  // Calculate stats by Area for this participant
+  // El desempeño por área lo entrega el servidor: aquí no existe la clave.
   const getAreaResultStats = (areaId: string) => {
-    let total = 0;
-    let correct = 0;
-
-    PREGUNTAS.forEach((q, i) => {
-      if (q.area === areaId) {
-        total += 1;
-        if (result.answers[i] === q.correctAnswerIndex) {
-          correct += 1;
-        }
-      }
-    });
-
+    const porArea = result.grading?.porArea?.[areaId];
+    const total = porArea
+      ? porArea.total
+      : PREGUNTAS.filter((q) => q.area === areaId).length;
+    const correct = porArea ? porArea.aciertos : 0;
     const scorePct = total ? Math.round((correct / total) * 100) : 0;
     return { total, correct, scorePct };
   };
 
+  const sinConexion = result.estado === "sin_conexion";
+
   return (
     <div className="space-y-8">
+      {sinConexion && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 text-amber-900">
+          <p className="font-bold text-sm mb-1">No pudimos calificar en línea</p>
+          <p className="text-sm leading-relaxed">
+            Tus respuestas quedaron registradas, pero no se logró contactar al
+            servidor de calificación, así que el puntaje aún no está disponible.
+            Escríbenos y te lo hacemos llegar; no necesitas repetir el examen.
+          </p>
+        </div>
+      )}
+
       {/* Upper Status Header */}
       <motion.div
         initial={{ opacity: 0, scale: 0.98 }}

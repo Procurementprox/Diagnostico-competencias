@@ -10,7 +10,7 @@ import ParticipantForm from "./components/ParticipantForm";
 import QuestionCard from "./components/QuestionCard";
 import ExamResultsView from "./components/ExamResultsView";
 import AdminPanel from "./components/AdminPanel";
-import { Participant, ExamResult } from "./types";
+import { Participant, ExamResult, ServerGrading } from "./types";
 import { PREGUNTAS, AREAS } from "./questions";
 import { motion, AnimatePresence } from "motion/react";
 import { Timer, AlertTriangle, Info, CheckCircle2 } from "lucide-react";
@@ -20,6 +20,26 @@ const RESULTS_KEY = "pp_exam_results_history";
 const SHEETS_URL_KEY = "pp_configured_sheets_url";
 const DEFAULT_SHEETS_URL = "https://script.google.com/macros/s/AKfycbyX-oRhfMz4NxBrOIdNuA0YnBXd7EJW_vfuxbYWEglfeti-UnNjUshTsZOJijSOvHMw/exec";
 const EXAM_DURATION_SECONDS = 30 * 60; // 30 minutes
+const GRADING_TIMEOUT_MS = 20000;
+
+/**
+ * Barajado Fisher-Yates. Devuelve los índices canónicos de las opciones en el
+ * orden en que se mostrarán, de modo que la posición en pantalla deje de
+ * delatar cuál es la respuesta correcta. El índice canónico es el único que
+ * viaja al servidor, así que la CLAVE del Apps Script no se ve afectada.
+ */
+function barajarIndices(n: number): number[] {
+  const orden = Array.from({ length: n }, (_, i) => i);
+  for (let i = orden.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [orden[i], orden[j]] = [orden[j], orden[i]];
+  }
+  return orden;
+}
+
+function ordenInicialOpciones(): number[][] {
+  return PREGUNTAS.map((q) => barajarIndices(q.options.length));
+}
 
 export default function App() {
   // Session unlock state (saved in sessionStorage so a browser reload preserves session)
@@ -37,6 +57,11 @@ export default function App() {
   const [timeRemaining, setTimeRemaining] = useState(EXAM_DURATION_SECONDS);
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [error, setError] = useState("");
+
+  // Orden de presentación de las opciones, distinto para cada intento.
+  const [ordenOpciones, setOrdenOpciones] = useState<number[][]>(ordenInicialOpciones);
+  // Mientras el servidor califica no se puede volver a enviar.
+  const [isGrading, setIsGrading] = useState(false);
 
   // Loaded from storage
   const [sheetsUrl, setSheetsUrl] = useState(() => {
@@ -134,93 +159,121 @@ export default function App() {
   };
 
   // Hidden submission mechanism to Google Sheets Webapp
-  const submitToGoogleSheets = (result: ExamResult, targetUrl: string) => {
-    if (!targetUrl) return;
+  /**
+   * Envía las respuestas al Apps Script y DEVUELVE la calificación.
+   * La nota se calcula solo en el servidor: aquí no existe la clave.
+   * Se usa Content-Type text/plain para que el navegador no dispare el
+   * preflight CORS, que Apps Script no responde.
+   */
+  const gradeOnServer = async (
+    participantData: Participant,
+    answersArray: (number | null)[],
+    ordenUsado: number[][],
+    wasTimeout: boolean,
+    timeSpentSeconds: number,
+    targetUrl: string
+  ): Promise<ServerGrading | null> => {
+    if (!targetUrl) return null;
+
+    // Posición en pantalla (0..3) que marcó el participante. Sirve para detectar
+    // a quien siempre elige el mismo lugar sin leer; con el orden barajado ese
+    // patrón ya no puede confundirse con conocimiento real.
+    const posiciones = answersArray.map((canonical, i) =>
+      canonical === null ? "" : ordenUsado[i].indexOf(canonical)
+    );
+
+    const payload = {
+      version: "2.0",
+      enviado: new Date().toISOString(),
+      motivo_cierre: wasTimeout ? "tiempo_agotado" : "completado",
+      segundos_empleados: timeSpentSeconds,
+      participante: {
+        nombre: participantData.nombre,
+        correo: participantData.correo,
+        empresa: participantData.empresa,
+        cargo: participantData.cargo,
+        area: participantData.area,
+        experiencia: participantData.experiencia
+      },
+      // Índices canónicos (no la posición en pantalla, que va barajada).
+      respuestas: answersArray,
+      posiciones: posiciones
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), GRADING_TIMEOUT_MS);
 
     try {
-      const iframeName = `pp_sink_${Date.now()}`;
-      const iframe = document.createElement("iframe");
-      iframe.name = iframeName;
-      iframe.style.display = "none";
-      document.body.appendChild(iframe);
+      const response = await fetch(targetUrl, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
 
-      const form = document.createElement("form");
-      form.action = targetUrl;
-      form.method = "POST";
-      form.target = iframeName;
-
-      const payload = {
-        version: "1.1",
-        enviado: new Date().toISOString(),
-        motivo_cierre: result.wasTimeLimitExceeded ? "tiempo_agotado" : "completado",
-        participante: {
-          nombre: result.participant.nombre,
-          correo: result.participant.correo,
-          empresa: result.participant.empresa,
-          cargo: result.participant.cargo,
-          area: result.participant.area,
-          experiencia: result.participant.experiencia
-        },
-        respuestas: result.answers.map(ans => ans === null ? "" : ["A", "B", "C", "D"][ans])
-      };
-
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = "data";
-      input.value = JSON.stringify(payload);
-
-      form.appendChild(input);
-      document.body.appendChild(form);
-      form.submit();
-
-      // Clear DOM after submit
-      setTimeout(() => {
-        document.body.removeChild(form);
-        document.body.removeChild(iframe);
-      }, 5000);
+      const data = await response.json();
+      if (data && data.result === "ok" && data.calificacion) {
+        return data.calificacion as ServerGrading;
+      }
+      if (data && data.result === "duplicate") {
+        alert(
+          "Este correo ya registró un intento. El diagnóstico admite una sola " +
+          "presentación por participante, así que no se calificará de nuevo."
+        );
+        return null;
+      }
+      console.error("El servidor no devolvió calificación:", data);
+      return null;
     } catch (err) {
-      console.error("Error submitting to Google Sheets Webapp:", err);
+      console.error("Error al calificar en el servidor:", err);
+      return null;
+    } finally {
+      clearTimeout(timeoutId);
     }
   };
 
-  const handleSubmitExam = (wasTimeout = false) => {
+  const handleSubmitExam = async (wasTimeout = false) => {
+    if (isGrading) return;
     setIsTimerRunning(false);
 
     if (!participant) return;
 
-    // Calculate score
-    let correctCount = 0;
-    const answersArray: (number | null)[] = [];
-
-    PREGUNTAS.forEach((q, idx) => {
+    const answersArray: (number | null)[] = PREGUNTAS.map((_, idx) => {
       const selected = answers[idx];
-      answersArray.push(selected !== undefined ? selected : null);
-      if (selected === q.correctAnswerIndex) {
-        correctCount += 1;
-      }
+      return selected !== undefined ? selected : null;
     });
 
     const totalCount = PREGUNTAS.length;
-    const scorePercentage = Math.round((correctCount / totalCount) * 100);
+    const timeSpentSeconds = EXAM_DURATION_SECONDS - timeRemaining;
+
+    setIsGrading(true);
+    const grading = await gradeOnServer(
+      participant,
+      answersArray,
+      ordenOpciones,
+      wasTimeout,
+      timeSpentSeconds,
+      sheetsUrl
+    );
+    setIsGrading(false);
 
     const resultObj: ExamResult = {
       participant,
       answers: answersArray,
-      score: scorePercentage,
-      correctCount,
+      score: grading ? grading.porcentaje : 0,
+      correctCount: grading ? grading.total : 0,
       totalCount,
       date: new Date().toISOString(),
-      timeSpentSeconds: EXAM_DURATION_SECONDS - timeRemaining,
+      timeSpentSeconds,
       wasTimeLimitExceeded: wasTimeout,
+      estado: grading ? "calificado" : "sin_conexion",
+      grading: grading ?? undefined
     };
 
     // Store in historical registry
     setResultsHistory((prev) => [...prev, resultObj]);
     setActiveResult(resultObj);
     setScreen("results");
-
-    // Post to sheets backend using the iframe pipeline
-    submitToGoogleSheets(resultObj, sheetsUrl);
   };
 
   const handleTimeoutSubmission = () => {
@@ -234,6 +287,8 @@ export default function App() {
     setAnswers({});
     setCurrentQuestionIndex(0);
     setActiveResult(null);
+    // Nuevo intento, nuevo orden de opciones.
+    setOrdenOpciones(ordenInicialOpciones());
   };
 
   const handleClearResultsHistory = () => {
@@ -370,10 +425,13 @@ export default function App() {
                     questionIndexInArea={questionIndexInArea}
                     totalQuestionsInArea={totalQuestionsInArea}
                     selectedAnswer={answers[currentQuestionIndex] ?? null}
+                    optionOrder={ordenOpciones[currentQuestionIndex]}
                     onAnswerSelect={handleAnswerSelect}
                     onNext={handleNext}
                     onBack={handleBack}
                     error={error}
+                    isSubmitting={isGrading}
+                    isLastQuestion={currentQuestionIndex === PREGUNTAS.length - 1}
                   />
                 </div>
               )}

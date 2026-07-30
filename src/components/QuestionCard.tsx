@@ -15,11 +15,16 @@ interface QuestionCardProps {
   totalAreasCount: number;
   questionIndexInArea: number; // 0-based
   totalQuestionsInArea: number;
+  /** Índice canónico de la opción elegida (no su posición en pantalla). */
   selectedAnswer: number | null;
+  /** Índices canónicos en el orden barajado en que deben mostrarse. */
+  optionOrder: number[];
   onAnswerSelect: (optionIndex: number) => void;
   onNext: () => void;
   onBack: () => void;
   error: string;
+  isSubmitting: boolean;
+  isLastQuestion: boolean;
 }
 
 export default function QuestionCard({
@@ -30,12 +35,17 @@ export default function QuestionCard({
   questionIndexInArea,
   totalQuestionsInArea,
   selectedAnswer,
+  optionOrder,
   onAnswerSelect,
   onNext,
   onBack,
   error,
+  isSubmitting,
+  isLastQuestion,
 }: QuestionCardProps) {
   const letters = ["A", "B", "C", "D"];
+  // Si por alguna razón no llega el orden, se cae al orden canónico.
+  const orden = optionOrder ?? currentQuestion.options.map((_, i) => i);
 
   return (
     <motion.div
@@ -78,13 +88,14 @@ export default function QuestionCard({
 
       {/* Options List */}
       <div className="space-y-3.5">
-        {currentQuestion.options.map((option, idx) => {
-          const isSelected = selectedAnswer === idx;
+        {orden.map((canonicalIdx, displayIdx) => {
+          const option = currentQuestion.options[canonicalIdx];
+          const isSelected = selectedAnswer === canonicalIdx;
           return (
             <button
-              key={idx}
+              key={canonicalIdx}
               type="button"
-              onClick={() => onAnswerSelect(idx)}
+              onClick={() => onAnswerSelect(canonicalIdx)}
               className={`w-full text-left flex items-start gap-4 p-4 rounded-xl border transition-all ${
                 isSelected
                   ? "border-[#0305AF] bg-blue-50/40 shadow-sm shadow-blue-900/5"
@@ -98,7 +109,7 @@ export default function QuestionCard({
                     : "bg-white text-[#0305AF] border-slate-200"
                 }`}
               >
-                {letters[idx]}
+                {letters[displayIdx]}
               </span>
               <span
                 className={`text-sm md:text-base leading-relaxed ${
@@ -133,9 +144,16 @@ export default function QuestionCard({
         <button
           type="button"
           onClick={onNext}
-          className="flex items-center justify-center gap-2 text-sm font-bold text-white bg-[#0305AF] hover:bg-[#02036e] py-3 px-6 rounded-xl shadow-lg shadow-blue-900/10 transition-all"
+          disabled={isSubmitting}
+          className="flex items-center justify-center gap-2 text-sm font-bold text-white bg-[#0305AF] hover:bg-[#02036e] disabled:opacity-60 disabled:cursor-not-allowed py-3 px-6 rounded-xl shadow-lg shadow-blue-900/10 transition-all"
         >
-          <span>Siguiente</span>
+          <span>
+            {isSubmitting
+              ? "Calificando…"
+              : isLastQuestion
+                ? "Finalizar y calificar"
+                : "Siguiente"}
+          </span>
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>
